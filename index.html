@@ -4,10 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>スマート冷蔵庫管理</title>
-  <!-- Supabase JS Client CDN -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 16px; background: #f8fafc; color: #1e293b; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 16px; background: #f8fafc; color: #1e293b; max-width: 600px; margin: 0 auto; }
     .card { background: #fff; padding: 16px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 16px; }
     h2, h3 { margin-top: 0; }
     input, select, button { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; font-size: 14px; }
@@ -17,19 +16,22 @@
     .badge { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #e2e8f0; }
     .expired { color: #dc2626; font-weight: bold; }
     .hidden { display: none; }
+    video { width: 100%; border-radius: 8px; background: #000; max-height: 260px; object-fit: cover; }
+    .camera-box { background: #eff6ff; padding: 12px; border-radius: 8px; margin-bottom: 12px; }
+    .error-msg { color: #dc2626; font-size: 12px; margin-top: 4px; }
   </style>
 </head>
 <body>
 
-  <!-- 1. 接続設定・合言葉（キーコード）入力画面 -->
+  <!-- 1. 接続設定パネル -->
   <div id="auth-panel" class="card">
     <h2>初期設定 & 合言葉</h2>
-    <p style="font-size: 13px; color: #64748b;">発表・共有時は各環境のAPIキーと合言葉を入れて接続します。</p>
-    <input type="text" id="supabase-url" placeholder="Supabase Project URL">
-    <input type="text" id="supabase-key" placeholder="Supabase Anon Key">
-    <input type="password" id="gemini-key" placeholder="Gemini API Key">
-    <input type="text" id="family-id" placeholder="共有合言葉（例: tanaka-fridge-2026）">
+    <input type="text" id="supabase-url" placeholder="Supabase Project URL (https://xxx.supabase.co)">
+    <input type="text" id="supabase-key" placeholder="Supabase Anon Key (eyJ...)">
+    <input type="password" id="gemini-key" placeholder="Gemini API Key (AIzaSy...)">
+    <input type="text" id="family-id" placeholder="共有合言葉（例: my-fridge）">
     <button onclick="initApp()">入室（同期開始）</button>
+    <div id="auth-error" class="error-msg"></div>
   </div>
 
   <!-- 2. 冷蔵庫メイン画面 -->
@@ -39,16 +41,20 @@
         <h3 style="margin:0;">冷蔵庫 (<span id="display-family"></span>)</h3>
         <button style="width: auto; padding: 4px 8px; background: #64748b;" onclick="resetAuth()">設定変更</button>
       </div>
-      
-      <!-- カメラで賞味期限を読み取る -->
-      <div style="margin-top: 12px; background: #eff6ff; padding: 12px; border-radius: 8px;">
-        <label style="font-weight: bold; font-size: 13px;">📷 カメラで自動解析（品名・賞味期限）</label>
-        <input type="file" id="camera-input" accept="image/*" capture="environment" onchange="analyzeImage(event)">
-        <div id="ocr-status" style="font-size: 12px; color: #2563eb; margin-top: 4px;"></div>
+
+      <!-- 画面直接カメラビュー -->
+      <div class="camera-box">
+        <label style="font-weight: bold; font-size: 13px;">📷 カメラで直接撮影・賞味期限解析</label>
+        <div id="video-container" style="margin-top: 8px; display: none;">
+          <video id="webcam" playsinline autoplay></video>
+          <button style="background: #16a34a; margin-top: 6px;" onclick="captureAndAnalyze()">📸 この写真で解析する</button>
+        </div>
+        <button id="btn-start-camera" style="background: #0284c7; margin-top: 8px;" onclick="startCamera()">カメラを起動する</button>
+        <div id="ocr-status" style="font-size: 12px; color: #2563eb; margin-top: 6px;"></div>
       </div>
 
-      <!-- 手動入力・確認フォーム -->
-      <div style="margin-top: 12px;">
+      <!-- 入力フォーム -->
+      <div>
         <input type="text" id="item-name" placeholder="品名 (例: 納豆、牛乳)">
         <input type="date" id="item-expiry">
         <select id="item-category">
@@ -61,7 +67,7 @@
       </div>
     </div>
 
-    <!-- 在庫一覧表示（リアルタイム同期） -->
+    <!-- 在庫一覧 -->
     <div class="card">
       <h3>在庫一覧</h3>
       <div id="item-list">読み込み中...</div>
@@ -72,8 +78,8 @@
 let supabaseClient = null;
 let currentFamilyId = '';
 let geminiApiKey = '';
+let videoStream = null;
 
-// 保存済み認証情報のロード
 window.onload = () => {
   const savedUrl = localStorage.getItem('sb_url') || '';
   const savedKey = localStorage.getItem('sb_key') || '';
@@ -101,13 +107,17 @@ function initApp() {
     return;
   }
 
-  // 設定を保持
   localStorage.setItem('sb_url', url);
   localStorage.setItem('sb_key', key);
   localStorage.setItem('gemini_key', geminiApiKey);
   localStorage.setItem('family_id', currentFamilyId);
 
-  supabaseClient = supabase.createClient(url, key);
+  try {
+    supabaseClient = supabase.createClient(url, key);
+  } catch(e) {
+    document.getElementById('auth-error').innerText = '接続に失敗しました: ' + e.message;
+    return;
+  }
 
   document.getElementById('auth-panel').classList.add('hidden');
   document.getElementById('main-panel').classList.remove('hidden');
@@ -118,50 +128,57 @@ function initApp() {
 }
 
 function resetAuth() {
+  if (videoStream) {
+    videoStream.getTracks().forEach(track => track.stop());
+  }
   localStorage.clear();
   location.reload();
 }
 
-// 1. 在庫の取得
+// 在庫取得
 async function fetchItems() {
-  const { data, error } = await supabaseClient
-    .from('fridge_items')
-    .select('*')
-    .eq('family_id', currentFamilyId)
-    .order('created_at', { ascending: false });
+  const listEl = document.getElementById('item-list');
+  try {
+    const { data, error } = await supabaseClient
+      .from('fridge_items')
+      .select('*')
+      .eq('family_id', currentFamilyId)
+      .order('created_at', { ascending: false });
 
-  if (error) {
-    console.error(error);
-    return;
+    if (error) {
+      listEl.innerHTML = `<p class="error-msg">取得エラー: ${error.message} (SQLが実行されているか確認してください)</p>`;
+      return;
+    }
+    renderList(data);
+  } catch(err) {
+    listEl.innerHTML = `<p class="error-msg">通信エラー: ${err.message}</p>`;
   }
-  renderList(data);
 }
 
-// 2. リアルタイムリスナーの登録
+// リアルタイム購読
 function subscribeRealtime() {
   supabaseClient
-    .channel('fridge_realtime')
+    .channel('fridge_realtime_' + currentFamilyId)
     .on('postgres_changes', { 
       event: '*', 
       schema: 'public', 
       table: 'fridge_items',
       filter: `family_id=eq.${currentFamilyId}` 
     }, () => {
-      fetchItems(); // 誰かが追加・削除したら一覧を再取得
+      fetchItems();
     })
     .subscribe();
 }
 
-// 3. 在庫の描画
+// 描画
 function renderList(items) {
   const listEl = document.getElementById('item-list');
-  if (items.length === 0) {
+  if (!items || items.length === 0) {
     listEl.innerHTML = '<p style="color:#94a3b8; font-size:13px;">食材がありません</p>';
     return;
   }
 
   const today = new Date().toISOString().split('T')[0];
-
   listEl.innerHTML = items.map(item => {
     const isExpired = item.expiry_date && item.expiry_date < today;
     return `
@@ -179,7 +196,6 @@ function renderList(items) {
   }).join('');
 }
 
-// 4. 在庫追加
 async function addItem() {
   const name = document.getElementById('item-name').value.trim();
   const expiry = document.getElementById('item-expiry').value;
@@ -187,56 +203,79 @@ async function addItem() {
 
   if (!name) return;
 
-  await supabaseClient.from('fridge_items').insert([{
+  const { error } = await supabaseClient.from('fridge_items').insert([{
     family_id: currentFamilyId,
     name: name,
     expiry_date: expiry || null,
     category: category
   }]);
 
-  document.getElementById('item-name').value = '';
-  document.getElementById('item-expiry').value = '';
-}
-
-// 5. 在庫削除
-async function deleteItem(id) {
-  await supabaseClient.from('fridge_items').delete().eq('id', id);
-}
-
-// 6. Gemini Visionによる賞味期限・品名解析
-async function analyzeImage(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  if (!geminiApiKey) {
-    alert('Gemini API Keyが入力されていません');
+  if (error) {
+    alert('保存に失敗しました: ' + error.message);
     return;
   }
 
-  const statusEl = document.getElementById('ocr-status');
-  statusEl.innerText = '画像を解析中（Gemini）...';
+  document.getElementById('item-name').value = '';
+  document.getElementById('item-expiry').value = '';
+  fetchItems();
+}
 
-  // Base64変換
-  const base64Data = await new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result.split(',')[1]);
-    reader.readAsDataURL(file);
-  });
+async function deleteItem(id) {
+  await supabaseClient.from('fridge_items').delete().eq('id', id);
+  fetchItems();
+}
 
-  const prompt = `この画像から食材・食品の名前と、記載されている賞味期限または消費期限を抽出してください。
-賞味期限は YYYY-MM-DD 形式に変換してください。年の記載がない場合は現在年とみなしてください。
-出力は以下のJSONフォーマットのみを返してください：
-{"name": "品名", "expiry_date": "YYYY-MM-DD", "category": "冷蔵 または 冷凍 または 野菜"}
-日付が読み取れない場合は expiry_date は null にしてください。`;
+// --- カメラ直接起動 & キャプチャ ---
+async function startCamera() {
+  const video = document.getElementById('webcam');
+  const container = document.getElementById('video-container');
+  const btnStart = document.getElementById('btn-start-camera');
 
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`, {
+    videoStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false
+    });
+    video.srcObject = videoStream;
+    container.style.display = 'block';
+    btnStart.style.display = 'none';
+  } catch (err) {
+    alert('カメラの起動に失敗しました（HTTPS環境で開いているか、カメラ権限を許可しているか確認してください）: ' + err.message);
+  }
+}
+
+async function captureAndAnalyze() {
+  if (!geminiApiKey) {
+    alert('Gemini API Keyが設定されていません。「設定変更」から入力してください。');
+    return;
+  }
+
+  const video = document.getElementById('webcam');
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  const base64Data = canvas.toDataURL('image/jpeg').split(',')[1];
+  const statusEl = document.getElementById('ocr-status');
+  statusEl.innerText = 'Geminiが画像を解析中...';
+
+  const prompt = `この画像に写っている食材・食品の名前と、記載されている賞味期限または消費期限を抽出してください。
+賞味期限は YYYY-MM-DD 形式に変換してください。
+必ず以下のJSON形式のみで出力してください：
+{"name": "品名", "expiry_date": "YYYY-MM-DD", "category": "冷蔵 または 冷凍 または 野菜"}
+日付が不明な場合は expiry_date を null にしてください。`;
+
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [
             { text: prompt },
-            { inline_data: { mime_type: file.type, data: base64Data } }
+            { inline_data: { mime_type: "image/jpeg", data: base64Data } }
           ]
         }],
         generationConfig: { response_mime_type: "application/json" }
@@ -251,10 +290,10 @@ async function analyzeImage(event) {
     if (parsed.expiry_date) document.getElementById('item-expiry').value = parsed.expiry_date;
     if (parsed.category) document.getElementById('item-category').value = parsed.category;
 
-    statusEl.innerText = '解析完了！フォームに反映しました。';
+    statusEl.innerText = '解析完了！フォームに入力されました。';
   } catch (err) {
     console.error(err);
-    statusEl.innerText = '解析に失敗しました。';
+    statusEl.innerText = '解析失敗（APIキーや制限を確認してください）';
   }
 }
 </script>
