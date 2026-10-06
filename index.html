@@ -2,300 +2,975 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <title>スマート冷蔵庫管理</title>
+  
+  <!-- Tailwind CSS & Google Fonts -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+  
+  <!-- Supabase JS Client -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- ブラウザ完結型OCRエンジン (Tesseract.js) -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', '"Noto Sans JP"', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 16px; background: #f8fafc; color: #1e293b; max-width: 600px; margin: 0 auto; }
-    .card { background: #fff; padding: 16px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 16px; }
-    h2, h3 { margin-top: 0; }
-    input, select, button { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; font-size: 14px; }
-    button { background: #2563eb; color: #fff; border: none; font-weight: bold; cursor: pointer; }
-    button:disabled { background: #94a3b8; }
-    .item-row { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #f1f5f9; padding: 8px 0; }
-    .badge { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #e2e8f0; }
-    .expired { color: #dc2626; font-weight: bold; }
-    .hidden { display: none; }
-    video { width: 100%; border-radius: 8px; background: #000; max-height: 260px; object-fit: cover; }
-    .camera-box { background: #eff6ff; padding: 12px; border-radius: 8px; margin-bottom: 12px; }
-    .error-msg { color: #dc2626; font-size: 12px; margin-top: 4px; }
+    body {
+      background-color: #f8fafc;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+    input, select, textarea {
+      user-select: text;
+    }
+    .scanner-laser {
+      position: absolute;
+      left: 10%;
+      right: 10%;
+      height: 2px;
+      background: #4f46e5;
+      box-shadow: 0 0 12px 2px rgba(99, 102, 241, 0.8);
+      animation: scanLaser 2s infinite ease-in-out;
+    }
+    @keyframes scanLaser {
+      0%, 100% { top: 15%; opacity: 0.3; }
+      50% { top: 85%; opacity: 1; }
+    }
+    /* スクロールバーの非表示 */
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
   </style>
 </head>
-<body>
+<body class="min-h-screen text-slate-800 flex flex-col items-center pb-24 antialiased">
 
-  <!-- 1. 接続設定パネル -->
-  <div id="auth-panel" class="card">
-    <h2>初期設定 & 合言葉</h2>
-    <input type="text" id="supabase-url" placeholder="Supabase Project URL (https://xxx.supabase.co)">
-    <input type="text" id="supabase-key" placeholder="Supabase Anon Key (eyJ...)">
-    <input type="password" id="gemini-key" placeholder="Gemini API Key (AIzaSy...)">
-    <input type="text" id="family-id" placeholder="共有合言葉（例: my-fridge）">
-    <button onclick="initApp()">入室（同期開始）</button>
-    <div id="auth-error" class="error-msg"></div>
+  <!-- トースト通知 -->
+  <div id="toast" class="fixed top-5 left-1/2 -translate-x-1/2 z-50 transition-all duration-300 transform -translate-y-12 opacity-0 pointer-events-none flex items-center gap-2 bg-slate-900/90 text-white text-sm font-medium px-4 py-2.5 rounded-full shadow-lg backdrop-blur-md">
+    <span id="toast-icon">✨</span>
+    <span id="toast-text">メッセージ</span>
   </div>
 
-  <!-- 2. 冷蔵庫メイン画面 -->
-  <div id="main-panel" class="hidden">
-    <div class="card">
-      <div style="display:flex; justify-content: space-between; align-items: center;">
-        <h3 style="margin:0;">冷蔵庫 (<span id="display-family"></span>)</h3>
-        <button style="width: auto; padding: 4px 8px; background: #64748b;" onclick="resetAuth()">設定変更</button>
+  <!-- 確認モーダル -->
+  <div id="confirm-modal" class="fixed inset-0 z-50 hidden bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl p-6 w-full max-w-sm shadow-2xl space-y-4">
+      <h3 id="confirm-title" class="text-base font-bold text-slate-900">確認</h3>
+      <p id="confirm-desc" class="text-sm text-slate-600">本当によろしいですか？</p>
+      <div class="flex gap-3 justify-end pt-2">
+        <button onclick="closeConfirm(false)" class="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition">キャンセル</button>
+        <button id="confirm-ok-btn" class="px-4 py-2 text-sm font-semibold bg-rose-600 text-white rounded-xl shadow-md hover:bg-rose-700 transition">実行する</button>
       </div>
-
-      <!-- 画面直接カメラビュー -->
-      <div class="camera-box">
-        <label style="font-weight: bold; font-size: 13px;">📷 カメラで直接撮影・賞味期限解析</label>
-        <div id="video-container" style="margin-top: 8px; display: none;">
-          <video id="webcam" playsinline autoplay></video>
-          <button style="background: #16a34a; margin-top: 6px;" onclick="captureAndAnalyze()">📸 この写真で解析する</button>
-        </div>
-        <button id="btn-start-camera" style="background: #0284c7; margin-top: 8px;" onclick="startCamera()">カメラを起動する</button>
-        <div id="ocr-status" style="font-size: 12px; color: #2563eb; margin-top: 6px;"></div>
-      </div>
-
-      <!-- 入力フォーム -->
-      <div>
-        <input type="text" id="item-name" placeholder="品名 (例: 納豆、牛乳)">
-        <input type="date" id="item-expiry">
-        <select id="item-category">
-          <option value="冷蔵">冷蔵</option>
-          <option value="冷凍">冷凍</option>
-          <option value="野菜">野菜</option>
-          <option value="その他">その他</option>
-        </select>
-        <button onclick="addItem()">在庫に追加する</button>
-      </div>
-    </div>
-
-    <!-- 在庫一覧 -->
-    <div class="card">
-      <h3>在庫一覧</h3>
-      <div id="item-list">読み込み中...</div>
     </div>
   </div>
 
-<script>
-let supabaseClient = null;
-let currentFamilyId = '';
-let geminiApiKey = '';
-let videoStream = null;
+  <header class="w-full max-w-md px-4 pt-6 pb-3 flex items-center justify-between">
+    <div>
+      <div class="flex items-center gap-2">
+        <span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span class="text-xs font-semibold tracking-wider text-slate-400 uppercase" id="header-badge">ローカル運用中</span>
+      </div>
+      <h1 class="text-2xl font-extrabold text-slate-900 tracking-tight flex items-center gap-1.5">
+        冷蔵庫 <span id="display-family" class="text-brand-600">スマート保管庫</span>
+      </h1>
+    </div>
+    <button onclick="openSettingsModal()" class="w-10 h-10 rounded-2xl bg-white border border-slate-200/80 shadow-sm flex items-center justify-center text-slate-600 active:scale-95 transition">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+    </button>
+  </header>
 
-window.onload = () => {
-  const savedUrl = localStorage.getItem('sb_url') || '';
-  const savedKey = localStorage.getItem('sb_key') || '';
-  const savedGemini = localStorage.getItem('gemini_key') || '';
-  const savedFamily = localStorage.getItem('family_id') || '';
+  <main class="w-full max-w-md px-4 space-y-4">
 
-  if (savedUrl) document.getElementById('supabase-url').value = savedUrl;
-  if (savedKey) document.getElementById('supabase-key').value = savedKey;
-  if (savedGemini) document.getElementById('gemini-key').value = savedGemini;
-  if (savedFamily) document.getElementById('family-id').value = savedFamily;
-
-  if (savedUrl && savedKey && savedFamily) {
-    initApp();
-  }
-};
-
-function initApp() {
-  const url = document.getElementById('supabase-url').value.trim();
-  const key = document.getElementById('supabase-key').value.trim();
-  geminiApiKey = document.getElementById('gemini-key').value.trim();
-  currentFamilyId = document.getElementById('family-id').value.trim();
-
-  if (!url || !key || !currentFamilyId) {
-    alert('URL、Anon Key、合言葉を入力してください');
-    return;
-  }
-
-  localStorage.setItem('sb_url', url);
-  localStorage.setItem('sb_key', key);
-  localStorage.setItem('gemini_key', geminiApiKey);
-  localStorage.setItem('family_id', currentFamilyId);
-
-  try {
-    supabaseClient = supabase.createClient(url, key);
-  } catch(e) {
-    document.getElementById('auth-error').innerText = '接続に失敗しました: ' + e.message;
-    return;
-  }
-
-  document.getElementById('auth-panel').classList.add('hidden');
-  document.getElementById('main-panel').classList.remove('hidden');
-  document.getElementById('display-family').innerText = currentFamilyId;
-
-  fetchItems();
-  subscribeRealtime();
-}
-
-function resetAuth() {
-  if (videoStream) {
-    videoStream.getTracks().forEach(track => track.stop());
-  }
-  localStorage.clear();
-  location.reload();
-}
-
-// 在庫取得
-async function fetchItems() {
-  const listEl = document.getElementById('item-list');
-  try {
-    const { data, error } = await supabaseClient
-      .from('fridge_items')
-      .select('*')
-      .eq('family_id', currentFamilyId)
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      listEl.innerHTML = `<p class="error-msg">取得エラー: ${error.message} (SQLが実行されているか確認してください)</p>`;
-      return;
-    }
-    renderList(data);
-  } catch(err) {
-    listEl.innerHTML = `<p class="error-msg">通信エラー: ${err.message}</p>`;
-  }
-}
-
-// リアルタイム購読
-function subscribeRealtime() {
-  supabaseClient
-    .channel('fridge_realtime_' + currentFamilyId)
-    .on('postgres_changes', { 
-      event: '*', 
-      schema: 'public', 
-      table: 'fridge_items',
-      filter: `family_id=eq.${currentFamilyId}` 
-    }, () => {
-      fetchItems();
-    })
-    .subscribe();
-}
-
-// 描画
-function renderList(items) {
-  const listEl = document.getElementById('item-list');
-  if (!items || items.length === 0) {
-    listEl.innerHTML = '<p style="color:#94a3b8; font-size:13px;">食材がありません</p>';
-    return;
-  }
-
-  const today = new Date().toISOString().split('T')[0];
-  listEl.innerHTML = items.map(item => {
-    const isExpired = item.expiry_date && item.expiry_date < today;
-    return `
-      <div class="item-row">
-        <div>
-          <strong>${item.name}</strong> 
-          <span class="badge">${item.category}</span>
-          <div style="font-size:12px; color:#64748b;" class="${isExpired ? 'expired' : ''}">
-            期限: ${item.expiry_date || '未設定'} ${isExpired ? '(期限切れ!)' : ''}
+    <!-- カメラ・スキャンセクション -->
+    <div class="bg-white border border-slate-200/80 rounded-3xl p-4 shadow-sm space-y-3">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-xl bg-brand-50 flex items-center justify-center text-brand-600 font-bold">
+            📷
+          </div>
+          <div>
+            <h2 class="text-sm font-bold text-slate-800">スマート解析スキャナー</h2>
+            <p class="text-xs text-slate-400">日付・食品名・バーコードを検知</p>
           </div>
         </div>
-        <button style="width:auto; padding:4px 8px; background:#ef4444;" onclick="deleteItem('${item.id}')">消費</button>
+        <span id="scan-mode-indicator" class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">内蔵OCRモード</span>
       </div>
-    `;
-  }).join('');
-}
 
-async function addItem() {
-  const name = document.getElementById('item-name').value.trim();
-  const expiry = document.getElementById('item-expiry').value;
-  const category = document.getElementById('item-category').value;
+      <!-- カメラ映像領域 -->
+      <div id="camera-viewport" class="relative hidden overflow-hidden rounded-2xl bg-black aspect-[4/3] flex items-center justify-center">
+        <video id="webcam" playsinline autoplay class="w-full h-full object-cover"></video>
+        <div class="scanner-laser"></div>
+        <div class="absolute inset-4 border-2 border-dashed border-white/40 rounded-xl pointer-events-none flex flex-col justify-between p-2">
+          <span class="text-[10px] text-white/80 bg-black/40 px-2 py-0.5 rounded self-start">賞味期限またはラベルを枠内に</span>
+          <span class="text-[10px] text-white/80 bg-black/40 px-2 py-0.5 rounded self-end">水平に合わせて撮影</span>
+        </div>
+      </div>
 
-  if (!name) return;
+      <!-- スキャンアクションボタン群 -->
+      <div class="space-y-2">
+        <button id="btn-toggle-camera" onclick="toggleCamera()" class="w-full py-3 px-4 bg-brand-600 hover:bg-brand-700 active:scale-[0.99] text-white font-bold text-sm rounded-2xl shadow-md shadow-brand-500/20 flex items-center justify-center gap-2 transition">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path><path stroke-linecap="round" stroke-linejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+          <span id="btn-camera-text">カメラを起動する</span>
+        </button>
 
-  const { error } = await supabaseClient.from('fridge_items').insert([{
-    family_id: currentFamilyId,
-    name: name,
-    expiry_date: expiry || null,
-    category: category
-  }]);
+        <div id="capture-actions" class="hidden grid grid-cols-2 gap-2">
+          <button onclick="captureAndOCR()" class="py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm flex items-center justify-center gap-1.5 transition">
+            <span>⚡ 内蔵OCRで解析</span>
+          </button>
+          <button onclick="captureAndGemini()" class="py-2.5 px-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-sm flex items-center justify-center gap-1.5 transition">
+            <span>✨ Gemini AIで高精度解析</span>
+          </button>
+        </div>
 
-  if (error) {
-    alert('保存に失敗しました: ' + error.message);
-    return;
-  }
+        <!-- アルバム画像からの解析（PCやアルバム選択用） -->
+        <div class="pt-1 flex items-center justify-between text-xs text-slate-500">
+          <span>写真ファイルから読み取る:</span>
+          <label class="cursor-pointer text-brand-600 font-semibold hover:underline">
+            画像を選択
+            <input type="file" id="file-input" accept="image/*" class="hidden" onchange="handleFileSelect(event)">
+          </label>
+        </div>
+      </div>
 
-  document.getElementById('item-name').value = '';
-  document.getElementById('item-expiry').value = '';
-  fetchItems();
-}
+      <!-- スキャン進捗表示 -->
+      <div id="scan-status" class="hidden text-xs py-2 px-3 rounded-xl bg-slate-50 border border-slate-200/60 text-slate-600 flex items-center justify-between">
+        <span id="scan-status-text">認識処理中...</span>
+        <div class="w-4 h-4 border-2 border-brand-500 border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    </div>
 
-async function deleteItem(id) {
-  await supabaseClient.from('fridge_items').delete().eq('id', id);
-  fetchItems();
-}
+    <div class="bg-white border border-slate-200/80 rounded-3xl p-5 shadow-sm space-y-3">
+      <h2 class="text-sm font-bold text-slate-800 flex items-center gap-1.5">
+        <span>✏️</span> 食材の追加・編集
+      <!-- 入力フォーム -->
+      <div class="space-y-2.5">
+        <div>
+          <label class="text-[11px] font-semibold text-slate-400 mb-1 block">品名</label>
+          <input type="text" id="item-name" list="item-name-candidates" placeholder="例: 納豆、牛乳、卵" oninput="autoDetectCategory(this.value)" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 transition">
+          <datalist id="item-name-candidates"></datalist>
+          
+          <!-- よく使う・選択中カテゴリのクイック候補タグ -->
+          <div id="quick-items-container" class="flex flex-wrap gap-1.5 mt-2 max-h-20 overflow-y-auto no-scrollbar"></div>
+        </div>
 
-// --- カメラ直接起動 & キャプチャ ---
-async function startCamera() {
-  const video = document.getElementById('webcam');
-  const container = document.getElementById('video-container');
-  const btnStart = document.getElementById('btn-start-camera');
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-[11px] font-semibold text-slate-400 mb-1 block">賞味期限 / 消費期限</label>
+            <input type="date" id="item-expiry" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 transition">
+          </div>
+          <div>
+            <label class="text-[11px] font-semibold text-slate-400 mb-1 block">保存場所 / カテゴリ</label>
+            <select id="item-category" onchange="onCategorySelectChange()" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 transition">
+              <!-- JSでCATEGORY_DATAから動的生成 -->
+            </select>
+          </div>
+        </div>
 
-  try {
-    videoStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } },
-      audio: false
+        <button onclick="saveItem()" class="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm rounded-xl shadow-md transition active:scale-[0.99] flex items-center justify-center gap-1.5">
+          <span>＋</span> 在庫に追加する
+        </button>
+      </div>
+    </div>
+
+    <div class="flex items-center justify-between px-1">
+      <div class="flex gap-1.5 overflow-x-auto no-scrollbar py-1" id="category-filter-pills">
+        <!-- JSで動的生成 -->
+      </div>
+      <span id="stock-count-text" class="text-xs font-bold text-slate-400 whitespace-nowrap pl-2">0品</span>
+    </div>
+
+    <!-- 在庫リストコンテナ -->
+    <div id="items-list" class="space-y-2">
+      <!-- 動的生成エリア -->
+    </div>
+
+  </main>
+
+  <div id="settings-modal" class="fixed inset-0 z-50 hidden bg-slate-900/40 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+        <h3 class="text-base font-bold text-slate-900">設定・クラウド同期</h3>
+        <button onclick="closeSettingsModal()" class="text-slate-400 hover:text-slate-600 text-lg font-bold">×</button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="font-bold text-slate-700 block mb-1">共有合言葉 (Family ID)</label>
+          <input type="text" id="cfg-family-id" placeholder="例: reizouko-family" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm">
+          <p class="text-[11px] text-slate-400 mt-0.5">家族全員で同じ合言葉を入力すると同期されます</p>
+        </div>
+
+        <div>
+          <label class="font-bold text-slate-700 block mb-1">Supabase Project URL</label>
+          <input type="text" id="cfg-sb-url" placeholder="https://xxx.supabase.co" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm">
+          <p class="text-[10px] text-emerald-600 mt-0.5 font-medium">※末尾に / や /rest/v1 が入っていても自動補正されます</p>
+        </div>
+
+        <div>
+          <label class="font-bold text-slate-700 block mb-1">Supabase Anon Key</label>
+          <input type="text" id="cfg-sb-key" placeholder="eyJ..." class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm">
+        </div>
+
+        <div class="pt-2 border-t border-slate-100">
+          <label class="font-bold text-slate-700 block mb-1">Gemini API Key（任意）</label>
+          <input type="password" id="cfg-gemini-key" placeholder="AQ... または AIzaSy..." class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm">
+          <p class="text-[11px] text-slate-400 mt-0.5">空欄でも「内蔵OCRスキャナー」で日付読み取りが可能です</p>
+        </div>
+      </div>
+
+      <div class="pt-2 flex flex-col gap-2">
+        <button onclick="saveAndApplySettings()" class="w-full py-3 bg-brand-600 hover:bg-brand-700 text-white font-bold text-sm rounded-xl shadow-md transition">
+          設定を保存して接続
+        </button>
+        <button onclick="clearAllDataConfirm()" class="w-full py-2.5 text-xs text-rose-500 font-semibold hover:bg-rose-50 rounded-xl transition">
+          保存データを初期化（リセット）
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 定数・ステート
+    const STORAGE_KEY_CONFIG = 'fridge_cfg_v2';
+    const STORAGE_KEY_ITEMS = 'fridge_local_items_v2';
+
+    // 食材カテゴリ辞書マスター
+    const CATEGORY_DATA = { 
+      "おかず": ["弁当", "沢庵", "のり", "切り干し大根", "漬物", "梅干", "明太子", "その他"], 
+      "タンパク質": ["黒豆", "豆腐", "卵", "その他"], 
+      "ナッツ": ["アーモンド", "カシューナッツ", "くるみ", "ピーナッツ", "その他"], 
+      "ハーブ・スパイス": ["カレー粉", "シソ", "生姜", "バジル", "パセリ", "青のり", "七味唐辛子", "その他"], 
+      "パン類": ["食パン", "その他"], 
+      "飲み物": ["コーヒー", "コーラ", "ジュース", "水", "豆乳", "炭酸水", "乳酸菌飲料", "緑茶", "麦茶", "その他"], 
+      "加工食品": ["カニ風味かまぼこ", "かまぼこ", "こんにゃく", "しらたき", "サンドウィッチ", "ハム", "さんま缶", "スイートコーン", "スパム", "鮭フレーク", "天かす", "納豆", "油揚げ", "その他"], 
+      "果物": ["アボカド", "イチゴ", "オレンジ", "キウイ", "グレープフルーツ", "さくらんぼ", "スイカ", "パイナップル", "バナナ", "ぶどう", "みかん", "メロン", "ライム", "りんご", "柿", "梨", "その他"], 
+      "魚介類": ["あさり", "イカ", "エビ", "カニ", "サーモン", "鯖", "さんま", "タコ", "ヒラメ", "マグロ", "牡蠣", "その他"], 
+      "穀物": ["もち米", "玄米", "雑穀", "米", "その他"], 
+      "酒類": ["ウイスキー", "ビール", "ワイン", "焼酎", "日本酒", "サワー", "その他"], 
+      "調味料・ソース": ["バーベキューソース", "オリーブオイル", "お好み焼きソース", "鰹節", "カレールー", "ケチャップ", "マヨネーズ", "胡椒", "塩", "コチュジャン", "ごま油", "ジャム", "醤油", "だし粉", "めんつゆ", "トマトソース", "とんかつソース", "蜂蜜", "バルサミコ酢", "ピーナッツバター", "ふりかけ", "ポン酢", "みりん", "メープルシロップ", "わさび", "砂糖", "酢", "味噌", "料理酒", "その他"], 
+      "肉類": ["ソーセージ", "ハム", "ベーコン", "牛肉", "鶏肉", "豚肉", "その他"], 
+      "乳製品": ["牛乳", "ヨーグルト", "バター", "チーズ", "クリームチーズ", "生クリーム", "モッツァレラチーズ", "アイスクリーム", "その他"], 
+      "粉類": ["パン粉", "小麦粉", "天ぷら粉", "その他"], 
+      "麺類": ["うどん", "そうめん", "そば", "パスタ", "ラーメン", "春雨", "カップラーメン", "その他"], 
+      "野菜": ["アスパラガス", "えのき", "エリンギ", "オクラ", "かぼちゃ", "キャベツ", "きゅうり", "グリーンピース", "ごぼう", "サツマイモ", "しいたけ", "しめじ", "じゃがいも", "ズッキーニ", "セロリ", "玉ねぎ", "青梗菜", "せり", "トマト", "ミニトマト", "なすび", "ニラ", "にんじん", "にんにく", "パプリカ", "ピーマン", "ヒラタケ", "ブロッコリー", "ほうれん草", "マッシュルーム", "白菜", "もやし", "レタス", "レンコン", "枝豆", "春菊", "大根", "長ネギ", "長芋", "緑豆もやし", "その他"], 
+      "冷凍食品": ["冷凍エビ", "冷凍チャーハン", "冷凍とんかつ", "冷凍ピザ", "冷凍フライドポテト", "冷凍ブロッコリー", "冷凍ほうれん草", "冷凍唐揚げ", "冷凍餃子", "冷凍サラダ", "冷凍弁当", "その他"], 
+      "その他": ["その他"] 
+    };
+
+    // カテゴリごとのアイコンマッピング
+    const CATEGORY_ICONS = {
+      "おかず": "🍱",
+      "タンパク質": "🥚",
+      "ナッツ": "🥜",
+      "ハーブ・スパイス": "🌿",
+      "パン類": "🍞",
+      "飲み物": "🥤",
+      "加工食品": "🥫",
+      "果物": "🍎",
+      "魚介類": "🐟",
+      "穀物": "🌾",
+      "酒類": "🍺",
+      "調味料・ソース": "🧂",
+      "肉類": "🥩",
+      "乳製品": "🧀",
+      "粉類": "🥣",
+      "麺類": "🍜",
+      "野菜": "🥬",
+      "冷凍食品": "❄️",
+      "その他": "📦"
+    };
+
+    let config = {
+      familyId: 'reizouko',
+      sbUrl: '',
+      sbKey: '',
+      geminiKey: ''
+    };
+
+    let localItems = [];
+    let supabaseClient = null;
+    let currentFilter = 'すべて';
+    let mediaStream = null;
+    let isCameraActive = false;
+
+    window.addEventListener('DOMContentLoaded', () => {
+      initCategoryControls();
+      loadConfig();
+      applyConfig();
+      fetchItems();
     });
-    video.srcObject = videoStream;
-    container.style.display = 'block';
-    btnStart.style.display = 'none';
-  } catch (err) {
-    alert('カメラの起動に失敗しました（HTTPS環境で開いているか、カメラ権限を許可しているか確認してください）: ' + err.message);
-  }
-}
 
-async function captureAndAnalyze() {
-  if (!geminiApiKey) {
-    alert('Gemini API Keyが設定されていません。「設定変更」から入力してください。');
-    return;
-  }
+    // カテゴリセレクトボックスと上部フィルターピル、サジェストの初期構築
+    function initCategoryControls() {
+      const select = document.getElementById('item-category');
+      const filterContainer = document.getElementById('category-filter-pills');
+      const datalist = document.getElementById('item-name-candidates');
 
-  const video = document.getElementById('webcam');
-  const canvas = document.createElement('canvas');
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      select.innerHTML = '';
+      datalist.innerHTML = '';
+      filterContainer.innerHTML = `
+        <button onclick="setFilter('すべて')" class="cat-pill px-3 py-1 rounded-full text-xs font-bold bg-slate-900 text-white shadow-sm transition whitespace-nowrap">すべて</button>
+      `;
 
-  const base64Data = canvas.toDataURL('image/jpeg').split(',')[1];
-  const statusEl = document.getElementById('ocr-status');
-  statusEl.innerText = 'Geminiが画像を解析中...';
+      const allItemsSet = new Set();
 
-  const prompt = `この画像に写っている食材・食品の名前と、記載されている賞味期限または消費期限を抽出してください。
-賞味期限は YYYY-MM-DD 形式に変換してください。
-必ず以下のJSON形式のみで出力してください：
-{"name": "品名", "expiry_date": "YYYY-MM-DD", "category": "冷蔵 または 冷凍 または 野菜"}
-日付が不明な場合は expiry_date を null にしてください。`;
+      Object.keys(CATEGORY_DATA).forEach(cat => {
+        // セレクト選択肢
+        const opt = document.createElement('option');
+        opt.value = cat;
+        opt.textContent = `${CATEGORY_ICONS[cat] || '📦'} ${cat}`;
+        select.appendChild(opt);
 
-  try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: prompt },
-            { inline_data: { mime_type: "image/jpeg", data: base64Data } }
-          ]
-        }],
-        generationConfig: { response_mime_type: "application/json" }
-      })
-    });
+        // フィルターボタン
+        const pill = document.createElement('button');
+        pill.onclick = () => setFilter(cat);
+        pill.className = 'cat-pill px-3 py-1 rounded-full text-xs font-semibold bg-white border border-slate-200 text-slate-600 transition whitespace-nowrap';
+        pill.textContent = `${CATEGORY_ICONS[cat] || ''} ${cat}`;
+        filterContainer.appendChild(pill);
 
-    const resJson = await response.json();
-    const resultText = resJson.candidates[0].content.parts[0].text;
-    const parsed = JSON.parse(resultText);
+        // datalist候補収集
+        CATEGORY_DATA[cat].forEach(name => {
+          if (name !== 'その他') allItemsSet.add(name);
+        });
+      });
 
-    if (parsed.name) document.getElementById('item-name').value = parsed.name;
-    if (parsed.expiry_date) document.getElementById('item-expiry').value = parsed.expiry_date;
-    if (parsed.category) document.getElementById('item-category').value = parsed.category;
+      // datalist生成
+      allItemsSet.forEach(name => {
+        const option = document.createElement('option');
+        option.value = name;
+        datalist.appendChild(option);
+      });
 
-    statusEl.innerText = '解析完了！フォームに入力されました。';
-  } catch (err) {
-    console.error(err);
-    statusEl.innerText = '解析失敗（APIキーや制限を確認してください）';
-  }
-}
-</script>
+      updateQuickCandidateTags();
+    }
+
+    // カテゴリ選択変更時にクイック食品タグを更新
+    function onCategorySelectChange() {
+      updateQuickCandidateTags();
+    }
+
+    // クイック入力タグを描画
+    function updateQuickCandidateTags() {
+      const currentCat = document.getElementById('item-category').value;
+      const container = document.getElementById('quick-items-container');
+      container.innerHTML = '';
+
+      const items = CATEGORY_DATA[currentCat] || [];
+      items.forEach(food => {
+        if (food === 'その他') return;
+        const tag = document.createElement('button');
+        tag.type = 'button';
+        tag.className = 'px-2.5 py-1 text-[11px] font-medium bg-slate-100 hover:bg-brand-50 hover:text-brand-600 rounded-lg text-slate-600 transition active:scale-95';
+        tag.textContent = food;
+        tag.onclick = () => {
+          document.getElementById('item-name').value = food;
+        };
+        container.appendChild(tag);
+      });
+    }
+
+    // 品名入力時にカテゴリを自動判別
+    function autoDetectCategory(inputName) {
+      if (!inputName) return;
+      const trimmed = inputName.trim();
+      
+      for (const [cat, foods] of Object.entries(CATEGORY_DATA)) {
+        if (foods.some(food => trimmed.includes(food) || food.includes(trimmed))) {
+          const select = document.getElementById('item-category');
+          if (select.value !== cat) {
+            select.value = cat;
+            updateQuickCandidateTags();
+          }
+          break;
+        }
+      }
+    }
+
+    function loadConfig() {
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY_CONFIG);
+        if (saved) {
+          config = { ...config, ...JSON.parse(saved) };
+        }
+      } catch (e) {
+        console.error('設定の読み込みに失敗:', e);
+      }
+
+      // UIに反映
+      document.getElementById('cfg-family-id').value = config.familyId || '';
+      document.getElementById('cfg-sb-url').value = config.sbUrl || '';
+      document.getElementById('cfg-sb-key').value = config.sbKey || '';
+      document.getElementById('cfg-gemini-key').value = config.geminiKey || '';
+    }
+
+    // URLの自動正規化（405エラーや末尾スラッシュ・/rest/v1を除去）
+    function normalizeSupabaseUrl(url) {
+      if (!url) return '';
+      let clean = url.trim();
+      clean = clean.replace(/\/+$/, ''); // 末尾スラッシュ除去
+      clean = clean.replace(/\/rest\/v1\/?$/, ''); // /rest/v1 除去
+      clean = clean.replace(/\/rest\/?$/, '');
+      return clean;
+    }
+
+    function applyConfig() {
+      config.sbUrl = normalizeSupabaseUrl(config.sbUrl);
+      document.getElementById('display-family').textContent = config.familyId || 'ローカル';
+
+      if (config.sbUrl && config.sbKey && window.supabase) {
+        try {
+          supabaseClient = window.supabase.createClient(config.sbUrl, config.sbKey);
+          document.getElementById('header-badge').textContent = 'クラウド同期中';
+          document.getElementById('header-badge').className = 'text-xs font-semibold tracking-wider text-emerald-600 uppercase';
+          subscribeRealtime();
+        } catch (e) {
+          console.error('Supabase初期化失敗:', e);
+          showToast('Supabase接続形式が不正です（ローカル保存します）', '⚠️');
+          supabaseClient = null;
+        }
+      } else {
+        supabaseClient = null;
+        document.getElementById('header-badge').textContent = 'ローカル運用中';
+        document.getElementById('header-badge').className = 'text-xs font-semibold tracking-wider text-slate-400 uppercase';
+      }
+
+      // Geminiキー有無のインジケーター表示
+      if (config.geminiKey) {
+        document.getElementById('scan-mode-indicator').textContent = 'AI + OCRモード';
+        document.getElementById('scan-mode-indicator').className = 'text-[11px] font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600';
+      } else {
+        document.getElementById('scan-mode-indicator').textContent = '内蔵OCRモード';
+        document.getElementById('scan-mode-indicator').className = 'text-[11px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600';
+      }
+    }
+
+    async function fetchItems() {
+      if (supabaseClient) {
+        try {
+          const { data, error } = await supabaseClient
+            .from('fridge_items')
+            .select('*')
+            .eq('family_id', config.familyId)
+            .order('expiry_date', { ascending: true, nullsFirst: false });
+
+          if (!error && data) {
+            renderList(data);
+            return;
+          }
+        } catch (err) {
+          console.warn('クラウド取得失敗。ローカルデータを表示します:', err);
+        }
+      }
+
+      // ローカルストレージから読み出し
+      try {
+        const stored = localStorage.getItem(STORAGE_KEY_ITEMS);
+        localItems = stored ? JSON.parse(stored) : [];
+      } catch (e) {
+        localItems = [];
+      }
+      renderList(localItems);
+    }
+
+    function renderList(items) {
+      const container = document.getElementById('items-list');
+      container.innerHTML = '';
+
+      const filtered = items.filter(it => currentFilter === 'すべて' || it.category === currentFilter);
+      document.getElementById('stock-count-text').textContent = `${filtered.length}品`;
+
+      if (filtered.length === 0) {
+        container.innerHTML = `
+          <div class="text-center py-12 px-4 bg-white border border-slate-200/60 rounded-3xl">
+            <span class="text-3xl block mb-2">🥬</span>
+            <p class="text-sm font-bold text-slate-700">食材が登録されていません</p>
+            <p class="text-xs text-slate-400 mt-1">カメラでスキャンするか上のフォームから追加してください</p>
+          </div>
+        `;
+        return;
+      }
+
+      const todayStr = new Date().toISOString().split('T')[0];
+
+      filtered.forEach(item => {
+        let badgeColor = 'bg-slate-100 text-slate-600';
+        let expiryText = item.expiry_date || '期限なし';
+        let isExpired = false;
+        let isWarning = false;
+
+        if (item.expiry_date) {
+          const diffDays = Math.ceil((new Date(item.expiry_date) - new Date(todayStr)) / (1000 * 60 * 60 * 24));
+          if (diffDays < 0) {
+            isExpired = true;
+            badgeColor = 'bg-rose-100 text-rose-700 font-bold';
+            expiryText = `${item.expiry_date} (期限切れ)`;
+          } else if (diffDays <= 2) {
+            isWarning = true;
+            badgeColor = 'bg-amber-100 text-amber-700 font-bold';
+            expiryText = `${item.expiry_date} (あと${diffDays}日)`;
+          } else {
+            badgeColor = 'bg-emerald-50 text-emerald-700 font-medium';
+            expiryText = `${item.expiry_date} (あと${diffDays}日)`;
+          }
+        }
+
+        const card = document.createElement('div');
+        const icon = CATEGORY_ICONS[item.category] || '📦';
+        card.className = 'flex items-center justify-between p-3.5 bg-white border border-slate-200/80 rounded-2xl shadow-sm hover:shadow transition';
+        card.innerHTML = `
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center font-bold text-lg">
+              ${icon}
+            </div>
+            <div>
+              <div class="flex items-center gap-1.5">
+                <span class="text-sm font-bold text-slate-900">${escapeHtml(item.name)}</span>
+                <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-medium">${escapeHtml(item.category)}</span>
+              </div>
+              <div class="text-xs mt-0.5 ${isExpired ? 'text-rose-600 font-bold' : isWarning ? 'text-amber-600 font-bold' : 'text-slate-400'}">
+                期限: ${expiryText}
+              </div>
+            </div>
+          </div>
+          <button onclick="consumeItem('${item.id}')" class="px-3 py-1.5 text-xs font-bold rounded-xl bg-slate-100 hover:bg-rose-50 hover:text-rose-600 text-slate-600 transition active:scale-95">
+            消費
+          </button>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    async function saveItem() {
+      const nameInput = document.getElementById('item-name');
+      const expiryInput = document.getElementById('item-expiry');
+      const categoryInput = document.getElementById('item-category');
+
+      const name = nameInput.value.trim();
+      const expiry = expiryInput.value || null;
+      const category = categoryInput.value || 'その他';
+
+      if (!name) {
+        showToast('品名を入力してください', '⚠️');
+        return;
+      }
+
+      const newItem = {
+        id: 'item_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+        family_id: config.familyId,
+        name: name,
+        expiry_date: expiry,
+        category: category,
+        created_at: new Date().toISOString()
+      };
+
+      if (supabaseClient) {
+        try {
+          const { error } = await supabaseClient.from('fridge_items').insert([{
+            family_id: newItem.family_id,
+            name: newItem.name,
+            expiry_date: newItem.expiry_date,
+            category: newItem.category
+          }]);
+          if (error) throw error;
+          showToast(`「${name}」をクラウドに追加しました`, '✨');
+        } catch (e) {
+          console.error('Supabase保存失敗。ローカルに保存:', e);
+          saveLocalItem(newItem);
+          showToast(`「${name}」をローカルに保存しました`, '💾');
+        }
+      } else {
+        saveLocalItem(newItem);
+        showToast(`「${name}」を追加しました`, '✅');
+      }
+
+      nameInput.value = '';
+      expiryInput.value = '';
+      fetchItems();
+    }
+
+    function saveLocalItem(item) {
+      localItems.unshift(item);
+      localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(localItems));
+    }
+
+    async function consumeItem(id) {
+      if (supabaseClient) {
+        try {
+          await supabaseClient.from('fridge_items').delete().eq('id', id);
+        } catch (e) {
+          console.error('クラウド削除失敗:', e);
+        }
+      }
+      localItems = localItems.filter(it => String(it.id) !== String(id));
+      localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(localItems));
+      showToast('食材を消費しました', '😋');
+      fetchItems();
+    }
+
+    function subscribeRealtime() {
+      if (!supabaseClient) return;
+      try {
+        supabaseClient
+          .channel('fridge_channel_' + config.familyId)
+          .on('postgres_changes', {
+            event: '*',
+            schema: 'public',
+            table: 'fridge_items',
+            filter: `family_id=eq.${config.familyId}`
+          }, () => {
+            fetchItems();
+          })
+          .subscribe();
+      } catch (e) {
+        console.warn('リアルタイム購読失敗:', e);
+      }
+    }
+
+    async function toggleCamera() {
+      const viewport = document.getElementById('camera-viewport');
+      const captureActions = document.getElementById('capture-actions');
+      const btnText = document.getElementById('btn-camera-text');
+
+      if (isCameraActive) {
+        stopCamera();
+        viewport.classList.add('hidden');
+        captureActions.classList.add('hidden');
+        btnText.textContent = 'カメラを起動する';
+        isCameraActive = false;
+        return;
+      }
+
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } },
+          audio: false
+        });
+        const video = document.getElementById('webcam');
+        video.srcObject = mediaStream;
+        await video.play();
+
+        viewport.classList.remove('hidden');
+        captureActions.classList.remove('hidden');
+        btnText.textContent = 'カメラを停止する';
+        isCameraActive = true;
+      } catch (err) {
+        console.error(err);
+        showToast('カメラを起動できませんでした（権限を確認してください）', '🚫');
+      }
+    }
+
+    function stopCamera() {
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(t => t.stop());
+        mediaStream = null;
+      }
+    }
+
+    function grabFrameCanvas() {
+      const video = document.getElementById('webcam');
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      return canvas;
+    }
+
+    async function captureAndOCR() {
+      const canvas = grabFrameCanvas();
+      runOfflineOCR(canvas);
+    }
+
+    function handleFileSelect(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+
+          if (config.geminiKey) {
+            runGeminiAnalysis(canvas.toDataURL('image/jpeg').split(',')[1]);
+          } else {
+            runOfflineOCR(canvas);
+          }
+        };
+        img.src = evt.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    async function runOfflineOCR(canvas) {
+      setScanStatus(true, '内蔵OCRでテキスト解析中...');
+      try {
+        if (!window.Tesseract) {
+          throw new Error('OCRライブラリが読み込まれていません');
+        }
+
+        const worker = await Tesseract.createWorker('eng+jpn');
+        const ret = await worker.recognize(canvas);
+        await worker.terminate();
+
+        const fullText = ret.data.text || '';
+        console.log('OCR検出テキスト:', fullText);
+
+        // 日付正規表現パース
+        const dateMatch = extractDateFromText(fullText);
+        if (dateMatch) {
+          document.getElementById('item-expiry').value = dateMatch;
+          showToast(`賞味期限 [${dateMatch}] を検出！`, '🎯');
+        } else {
+          showToast('日付は見つかりませんでした', 'ℹ️');
+        }
+
+        // CATEGORY_DATAマスター辞書から食品名を自動ヒット
+        let foundFood = null;
+        let matchedCat = null;
+        for (const [cat, foods] of Object.entries(CATEGORY_DATA)) {
+          for (const food of foods) {
+            if (food !== 'その他' && fullText.includes(food)) {
+              foundFood = food;
+              matchedCat = cat;
+              break;
+            }
+          }
+          if (foundFood) break;
+        }
+
+        if (foundFood) {
+          document.getElementById('item-name').value = foundFood;
+          document.getElementById('item-category').value = matchedCat;
+          updateQuickCandidateTags();
+          showToast(`食品名「${foundFood}」を検出しました！`, '✨');
+        } else {
+          // 該当辞書がない場合、短い行を候補に設定
+          const lines = fullText.split('\n').map(l => l.trim()).filter(l => l.length >= 2 && l.length <= 15);
+          if (lines.length > 0 && !document.getElementById('item-name').value) {
+            document.getElementById('item-name').value = lines[0];
+            autoDetectCategory(lines[0]);
+          }
+        }
+
+        setScanStatus(false);
+      } catch (err) {
+        console.error('OCRエラー:', err);
+        setScanStatus(false);
+        showToast('OCR認識に失敗しました: ' + err.message, '⚠️');
+      }
+    }
+
+    function extractDateFromText(text) {
+      if (!text) return null;
+      // YYYY/MM/DD, YYYY.MM.DD, YYYY-MM-DD
+      const y4Match = text.match(/(20[2-3][0-9])[\/\.\-年\s]+(0?[1-9]|1[0-2])[\/\.\-月\s]+(0?[1-9]|[12][0-9]|3[01])/);
+      if (y4Match) {
+        const y = y4Match[1];
+        const m = String(y4Match[2]).padStart(2, '0');
+        const d = String(y4Match[3]).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+      }
+
+      // YY.MM.DD (25.12.30 など)
+      const y2Match = text.match(/(2[4-9]|3[0-5])[\/\.\-](0?[1-9]|1[0-2])[\/\.\-](0?[1-9]|[12][0-9]|3[01])/);
+      if (y2Match) {
+        const y = '20' + y2Match[1];
+        const m = String(y2Match[2]).padStart(2, '0');
+        const d = String(y2Match[3]).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+      }
+
+      return null;
+    }
+
+    async function captureAndGemini() {
+      if (!config.geminiKey) {
+        showToast('Gemini API Keyが未設定です。設定から入力してください', '🔑');
+        openSettingsModal();
+        return;
+      }
+
+      const canvas = grabFrameCanvas();
+      const base64Data = canvas.toDataURL('image/jpeg').split(',')[1];
+      runGeminiAnalysis(base64Data);
+    }
+
+    async function runGeminiAnalysis(base64Data) {
+      setScanStatus(true, 'Gemini AIが高精度解析中...');
+
+      const prompt = `この画像に写っている食品・食材を判別してください。
+また、パッケージに印字されている「賞味期限」または「消費期限」を抽出してください。
+出力は必ず次のJSONフォーマットのみで行ってください：
+{
+  "name": "食品名（例: 納豆、牛乳）",
+  "expiry_date": "YYYY-MM-DD形式の賞味期限、不明ならnull",
+  "category": "冷蔵 または 冷凍 または 野菜 または その他"
+}`;
+
+      try {
+        // gemini-2.5-flash または gemini-1.5-flash エンドポイント
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${config.geminiKey}`;
+
+        const resp = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: prompt },
+                { inline_data: { mime_type: "image/jpeg", data: base64Data } }
+              ]
+            }],
+            generationConfig: { response_mime_type: "application/json" }
+          })
+        });
+
+        if (!resp.ok) {
+          const errData = await resp.json().catch(() => ({}));
+          throw new Error(errData.error?.message || `HTTP ${resp.status}`);
+        }
+
+        const result = await resp.json();
+        const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!jsonText) throw new Error('応答データが空でした');
+
+        const parsed = JSON.parse(jsonText);
+        if (parsed.name) document.getElementById('item-name').value = parsed.name;
+        if (parsed.expiry_date) document.getElementById('item-expiry').value = parsed.expiry_date;
+        if (parsed.category) document.getElementById('item-category').value = parsed.category;
+
+        showToast('Geminiによる自動入力を完了しました！', '✨');
+      } catch (err) {
+        console.error('Gemini呼び出し失敗:', err);
+        showToast('Gemini解析失敗。内蔵OCRに切り替えます: ' + err.message, '⚠️');
+        // 内蔵OCRへのフォールバック
+        const video = document.getElementById('webcam');
+        if (video) runOfflineOCR(grabFrameCanvas());
+      } finally {
+        setScanStatus(false);
+      }
+    }
+
+    function setScanStatus(isLoading, text = '') {
+      const box = document.getElementById('scan-status');
+      const textEl = document.getElementById('scan-status-text');
+      if (isLoading) {
+        box.classList.remove('hidden');
+        textEl.textContent = text;
+      } else {
+        box.classList.add('hidden');
+      }
+    }
+
+    function showToast(text, icon = '✨') {
+      const toast = document.getElementById('toast');
+      document.getElementById('toast-icon').textContent = icon;
+      document.getElementById('toast-text').textContent = text;
+      toast.classList.remove('opacity-0', '-translate-y-12', 'pointer-events-none');
+      setTimeout(() => {
+        toast.classList.add('opacity-0', '-translate-y-12', 'pointer-events-none');
+      }, 3000);
+    }
+
+    function setFilter(cat) {
+      currentFilter = cat;
+      const pills = document.querySelectorAll('.cat-pill');
+      pills.forEach(p => {
+        const text = p.textContent.replace(/^[\p{Extended_Pictographic}\s]+/u, '').trim();
+        if (text === cat || p.textContent.trim() === cat) {
+          p.className = 'cat-pill px-3 py-1 rounded-full text-xs font-bold bg-slate-900 text-white shadow-sm transition whitespace-nowrap';
+        } else {
+          p.className = 'cat-pill px-3 py-1 rounded-full text-xs font-semibold bg-white border border-slate-200 text-slate-600 transition whitespace-nowrap';
+        }
+      });
+      fetchItems();
+    }
+
+    function openSettingsModal() {
+      document.getElementById('settings-modal').classList.remove('hidden');
+    }
+
+    function closeSettingsModal() {
+      document.getElementById('settings-modal').classList.add('hidden');
+    }
+
+    function saveAndApplySettings() {
+      config.familyId = document.getElementById('cfg-family-id').value.trim() || 'reizouko';
+      config.sbUrl = normalizeSupabaseUrl(document.getElementById('cfg-sb-url').value);
+      config.sbKey = document.getElementById('cfg-sb-key').value.trim();
+      config.geminiKey = document.getElementById('cfg-gemini-key').value.trim();
+
+      localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(config));
+      applyConfig();
+      closeSettingsModal();
+      fetchItems();
+      showToast('設定を保存しました', '✅');
+    }
+
+    function clearAllDataConfirm() {
+      openConfirm('データの完全初期化', '保存されているローカル食材データとAPIキー設定をすべて削除しますか？', () => {
+        stopCamera();
+        localStorage.removeItem(STORAGE_KEY_CONFIG);
+        localStorage.removeItem(STORAGE_KEY_ITEMS);
+        localItems = [];
+        closeSettingsModal();
+        loadConfig();
+        applyConfig();
+        fetchItems();
+        showToast('初期化が完了しました', '🗑️');
+      });
+    }
+
+    // カスタム確認ダイアログ
+    let confirmCallback = null;
+    function openConfirm(title, desc, onOk) {
+      document.getElementById('confirm-title').textContent = title;
+      document.getElementById('confirm-desc').textContent = desc;
+      confirmCallback = onOk;
+      document.getElementById('confirm-ok-btn').onclick = () => {
+        if (confirmCallback) confirmCallback();
+        closeConfirm();
+      };
+      document.getElementById('confirm-modal').classList.remove('hidden');
+    }
+
+    function closeConfirm() {
+      document.getElementById('confirm-modal').classList.add('hidden');
+      confirmCallback = null;
+    }
+
+    function escapeHtml(str) {
+      return (str || '').replace(/[&<>'"]/g, tag => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+      }[tag] || tag));
+    }
+  </script>
 </body>
 </html>
